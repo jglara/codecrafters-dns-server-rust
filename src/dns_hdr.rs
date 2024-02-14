@@ -58,7 +58,7 @@ impl DNSHdr {
         let mut buf: BytesMut = BytesMut::with_capacity(DNS_HDR_SIZE);
 
         buf.put_u16_ne(self.id);
-        buf.put_u16_ne(self.flags);
+        buf.put_u16(self.flags);
         buf.put_u16_ne(self.qdcount);
         buf.put_u16_ne(self.ancount);
         buf.put_u16_ne(self.nscount);
@@ -80,4 +80,21 @@ impl DNSHdr {
             arcount: buf.get_u16_ne(),
         })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encoding() {
+        let answer = DNSHdr::new_response(12345);
+
+        assert_eq!(answer.id, 12345);
+        assert_eq!(answer.flags &0x8000 , 0x8000);
+
+        let bytes = answer.to_bytes();
+        println!("{bytes:?}");
+    }
+
 }
