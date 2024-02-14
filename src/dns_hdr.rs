@@ -22,8 +22,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::tag,
     combinator::map,
-    multi::{length_data, many1, many_till},
-    number::complete::{be_u16, be_u8},
+    multi::{length_data, many0, many_till},
+    number::complete::{be_u16, be_u32, be_u8},
     sequence::tuple,
 };
 
@@ -38,18 +38,20 @@ pub struct DNSHdr<'a> {
     pub nscount: u16,
     pub arcount: u16,
     pub queries: Vec<Query<'a>>,
+    pub answers: Vec<Answer<'a>>,
 }
 
 impl<'a> DNSHdr<'a> {
-    pub fn new_response(id: u16, queries: Vec<Query<'a>>) -> Self {
+    pub fn new_response(id: u16, queries: Vec<Query<'a>>, answers: Vec<Answer<'a>>) -> Self {
         DNSHdr {
             id: id,
             flags: DNSHdr::flags(1, 0, 0, 0, 0, 0, 0),
             qdcount: queries.len() as u16,
-            ancount: 0,
+            ancount: answers.len() as u16,
             nscount: 0,
             arcount: 0,
             queries: queries,
+            answers: answers,
         }
     }
 
@@ -74,19 +76,26 @@ impl<'a> DNSHdr<'a> {
             q.to_bytes(&mut buf);
         }
 
+        for a in self.answers.iter() {
+            a.to_bytes(&mut buf);
+        }
+
+
         buf.freeze()
     }
 
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
-        let (rest, (id, flags, qdcount, ancount, nscount, arcount, queries)) = tuple((
-            be_u16,
-            be_u16,
-            be_u16,
-            be_u16,
-            be_u16,
-            be_u16,
-            Query::from_bytes,
-        ))(buf)?;
+        let (rest, (id, flags, qdcount, ancount, nscount, arcount, queries, answers)) =
+            tuple((
+                be_u16,
+                be_u16,
+                be_u16,
+                be_u16,
+                be_u16,
+                be_u16,
+                Query::from_bytes,
+                Answer::from_bytes,
+            ))(buf)?;
 
         Ok((
             rest,
@@ -98,6 +107,7 @@ impl<'a> DNSHdr<'a> {
                 nscount,
                 arcount,
                 queries,
+                answers,
             },
         ))
     }
@@ -154,7 +164,7 @@ pub enum RRClass {
 
 impl<'a> Query<'a> {
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
-        let (rest, queries) = many1(map(
+        let (rest, queries) = many0(map(
             tuple((many_till(length_data(be_u8), tag("\x00")), be_u16, be_u16)),
             |((labels, _), qtype, qclass)| Query {
                 name: labels,
@@ -185,13 +195,93 @@ impl<'a> Query<'a> {
     }
 }
 
+/*
+0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|                                               |
+/                                               /
+/                      NAME                     /
+|                                               |
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|                      TYPE                     |
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|                     CLASS                     |
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|                      TTL                      |
+|                                               |
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+|                   RDLENGTH                    |
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--|
+/                     RDATA                     /
+/                                               /
++--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+*/
+#[derive(Debug, Clone)]
+pub struct Answer<'a> {
+    name: Vec<&'a [u8]>,
+    pub qtype: u16,
+    pub qclass: u16,
+    pub ttl: u32,
+    rddata: &'a [u8],
+}
+
+impl<'a> Answer<'a> {
+    pub fn new(name: &'a str, qtype: RRType, qclass: RRClass, ttl: u32, data: &'a [u8]) -> Self {
+        let name = name.split(".").map(|l| l.as_bytes()).collect::<Vec<_>>();
+
+        Answer {
+            name,
+            qtype: qtype as u16,
+            qclass: qclass as u16,
+            ttl,
+            rddata: data,
+        }
+    }
+
+    pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
+        let (rest, responses) = many0(map(
+            tuple((
+                many_till(length_data(be_u8), tag("\x00")),
+                be_u16,
+                be_u16,
+                be_u32,
+                length_data(be_u16),
+            )),
+            |((labels, _), qtype, qclass, ttl, rddata)| Answer {
+                name: labels,
+                qtype: qtype,
+                qclass: qclass,
+                ttl: ttl,
+                rddata,
+            },
+        ))(buf)?;
+
+        Ok((rest, responses))
+    }
+
+    pub fn to_bytes(&self, buf: &mut BytesMut) {
+        self.name.iter().for_each(|&l| {
+            buf.put_u8(l.len() as u8);
+            buf.extend_from_slice(l);
+        });
+        buf.put_u8(0);
+        buf.put_u16(self.qtype);
+        buf.put_u16(self.qclass);
+        buf.put_u32(self.ttl);
+        buf.put_u16(self.rddata.len() as u16);
+        buf.extend(self.rddata);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, net::Ipv4Addr};
+
     use super::*;
 
     #[test]
     fn test_encoding() {
-        let answer = DNSHdr::new_response(12345, vec![]);
+        let answer = DNSHdr::new_response(12345, vec![], vec![]);
 
         assert_eq!(answer.id, 12345);
         assert_eq!(answer.flags & 0x8000, 0x8000);
@@ -214,5 +304,27 @@ mod tests {
         assert_eq!(q.qtype, RRType::A as u16);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_answer_encode() -> Result<()> {
+
+
+        let rr_db: HashMap<String, (u32, Ipv4Addr)> = HashMap::from([(
+            "google.com".to_string(),
+            (60, Ipv4Addr::new(192, 168, 10, 10)),
+        )]);
+        let domain = "google.com";
+
+        let (ttl, data) = rr_db[domain];
+        let data = data.octets();
+        
+        let answer = Answer::new(domain, RRType::A, RRClass::IN, ttl, &data);
+        let mut buf = BytesMut::new();
+        answer.to_bytes(&mut buf);
+
+        println!("{answer:?} -> {buf:?}");
+
+       Ok(()) 
     }
 }
