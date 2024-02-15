@@ -7,11 +7,13 @@ mod dns_hdr;
 
 use dns_hdr::{Answer, DNSHdr, RRClass, RRType};
 
+use crate::dns_hdr::{Flags, RCode};
+
 fn main() -> Result<()> {
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
 
-    let rr_db: HashMap<String, (u32, [u8;4])> = HashMap::from([(
+    let rr_db: HashMap<String, (u32, [u8; 4])> = HashMap::from([(
         "codecrafters.io".to_string(),
         (60, Ipv4Addr::new(192, 168, 10, 10).octets()),
     )]);
@@ -30,19 +32,48 @@ fn main() -> Result<()> {
                             .collect::<Vec<_>>()
                     );
 
-                    let domain = request.queries[0].domain();
-                    let answs = rr_db.get(&domain).map(|(ttl,data)| {
-                        Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
-                    });
-                                        
-                    let response = DNSHdr::new_response(
-                        request.id,
-                        request.queries.clone(),
-                        Vec::from_iter(answs.into_iter()),
-                    );
+                    let response = match request.flags.opcode {
+                        0 => {
+                            let domain = request.queries[0].domain();
+                            let answs = rr_db.get(&domain).map(|(ttl, data)| {
+                                Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
+                            });
+
+                            DNSHdr::new(
+                                request.id,
+                                Flags {
+                                    qr: 1,
+                                    aa: 0,
+                                    tc: 0,
+                                    ra: 0,
+                                    rcode: RCode::OK as u8,
+                                    ..request.flags
+                                },
+                                request.queries.clone(),
+                                Vec::from_iter(answs.into_iter()),
+                            )
+                            .to_bytes()
+                        }
+                        _ => {
+                            DNSHdr::new(
+                                request.id,
+                                Flags {
+                                    qr: 1,
+                                    aa: 0,
+                                    tc: 0,
+                                    ra: 0,
+                                    rcode: RCode::NotImplemted as u8,
+                                    ..request.flags
+                                },
+                                request.queries.clone(),
+                                vec![],
+                            )
+                            .to_bytes()
+                        },
+                    };
 
                     udp_socket
-                        .send_to(&response.to_bytes(), source)
+                        .send_to(&response, source)
                         .expect("Failed to send response");
                 };
             }

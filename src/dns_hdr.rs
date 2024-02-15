@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use anyhow::Result;
 
 /*
@@ -27,14 +28,80 @@ use nom::{
     sequence::tuple,
 };
 
+use nom::bits::complete::take;
+
 const DNS_HDR_SIZE: usize = 12;
+
+#[derive(Debug, Copy, Clone)]
+pub struct Flags {
+    pub qr: u8,
+    pub opcode: u8,
+    pub aa: u8,
+    pub tc: u8,
+    pub rd: u8,
+    pub ra: u8,
+    pub rcode: u8,
+}
+
+impl Flags {
+    pub fn compress_u16(&self) -> u16 {
+        let flags_h: u8 =
+            (self.qr << 7) | (self.opcode << 3) | (self.aa << 2) | (self.tc << 1) | self.rd;
+        let flags_l: u8 = (self.ra << 7) | (self.rcode);
+
+        (flags_h as u16) << 8 | (flags_l as u16)
+    }
+
+    fn parse_flags<'a>(input: (&'a [u8], usize) ) -> nom::IResult<(&'a [u8], usize), Flags> {
+        map(
+            tuple((
+                take(1u8),
+                take(4u8),
+                take(1u8),
+                take(1u8),
+                take(1u8),
+                take(1u8),
+                take(3u8),
+                take(4u8),
+            )),
+            |(qr, opcode, aa, tc, rd, ra, _, rcode) :(u8,u8,u8,u8,u8,u8,u8,u8)| Flags {
+                qr,
+                opcode,
+                aa,
+                tc,
+                rd,
+                ra,
+                rcode,
+            }
+        )(input)
+        
+    }
+}
+
+#[repr(u8)]
+#[allow(dead_code)]
+pub enum OpCode {
+    QUERY = 0,
+    IQUERY = 1,
+    STATUS = 2,
+}
+
+#[repr(u8)]
+#[allow(dead_code)]
+pub enum RCode {
+    OK = 0,
+    FmtError = 1,
+    ServerFailure = 2,
+    NameError = 3,
+    NotImplemted = 4,
+    Refused = 5,
+}
+
 
 #[derive(Debug)]
 pub struct DNSHdr<'a> {
     pub id: u16,
-    flags: u16,
-    pub qdcount: u16,
-    pub ancount: u16,
+    pub flags: Flags,
     pub nscount: u16,
     pub arcount: u16,
     pub queries: Vec<Query<'a>>,
@@ -42,12 +109,10 @@ pub struct DNSHdr<'a> {
 }
 
 impl<'a> DNSHdr<'a> {
-    pub fn new_response(id: u16, queries: Vec<Query<'a>>, answers: Vec<Answer<'a>>) -> Self {
+    pub fn new(id: u16, flags: Flags, queries: Vec<Query<'a>>, answers: Vec<Answer<'a>>) -> Self {
         DNSHdr {
             id: id,
-            flags: DNSHdr::flags(1, 0, 0, 0, 0, 0, 0),
-            qdcount: queries.len() as u16,
-            ancount: answers.len() as u16,
+            flags: flags,
             nscount: 0,
             arcount: 0,
             queries: queries,
@@ -55,20 +120,13 @@ impl<'a> DNSHdr<'a> {
         }
     }
 
-    pub fn flags(qr: u8, opcode: u8, aa: u8, tc: u8, rd: u8, ra: u8, rcode: u8) -> u16 {
-        let flags_h: u8 = (qr << 7) | (opcode << 3) | (aa << 2) | (tc << 1) | rd;
-        let flags_l: u8 = (ra << 7) | (rcode);
-
-        (flags_h as u16) << 8 | (flags_l as u16)
-    }
-
     pub fn to_bytes(&self) -> Bytes {
         let mut buf: BytesMut = BytesMut::with_capacity(DNS_HDR_SIZE);
 
         buf.put_u16(self.id);
-        buf.put_u16(self.flags);
-        buf.put_u16(self.qdcount);
-        buf.put_u16(self.ancount);
+        buf.put_u16(self.flags.compress_u16());
+        buf.put_u16(self.queries.len() as u16);
+        buf.put_u16(self.answers.len() as u16);
         buf.put_u16(self.nscount);
         buf.put_u16(self.arcount);
 
@@ -80,15 +138,14 @@ impl<'a> DNSHdr<'a> {
             a.to_bytes(&mut buf);
         }
 
-
         buf.freeze()
     }
 
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
-        let (rest, (id, flags, qdcount, ancount, nscount, arcount, queries, answers)) =
+        let (rest, (id, flags, _qdcount, _ancount, nscount, arcount, queries, answers)) =
             tuple((
                 be_u16,
-                be_u16,
+                nom::bits::bits(Flags::parse_flags),
                 be_u16,
                 be_u16,
                 be_u16,
@@ -102,8 +159,6 @@ impl<'a> DNSHdr<'a> {
             DNSHdr {
                 id,
                 flags,
-                qdcount,
-                ancount,
                 nscount,
                 arcount,
                 queries,
@@ -135,6 +190,7 @@ pub struct Query<'a> {
 
 #[repr(u16)]
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum RRType {
     A = 1,      // Host Address
     NS = 2,     //an authoritative name server
@@ -155,6 +211,7 @@ pub enum RRType {
 }
 #[repr(u16)]
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum RRClass {
     IN = 1, // the Internet
     CS = 2, // the CSNET class (Obsolete - used only for examples in some obsolete RFCs)
@@ -281,10 +338,11 @@ mod tests {
 
     #[test]
     fn test_encoding() {
-        let answer = DNSHdr::new_response(12345, vec![], vec![]);
+        let flags = Flags { qr: 1, opcode: 0, aa: 0, tc: 0, rd: 0, ra: 0, rcode: 0 };
+        let answer = DNSHdr::new(12345, flags, vec![], vec![]);
 
         assert_eq!(answer.id, 12345);
-        assert_eq!(answer.flags & 0x8000, 0x8000);
+        assert_eq!(answer.flags.qr, 1);
 
         let bytes = answer.to_bytes();
         println!("{bytes:?}");
@@ -308,8 +366,6 @@ mod tests {
 
     #[test]
     fn test_answer_encode() -> Result<()> {
-
-
         let rr_db: HashMap<String, (u32, Ipv4Addr)> = HashMap::from([(
             "google.com".to_string(),
             (60, Ipv4Addr::new(192, 168, 10, 10)),
@@ -318,13 +374,13 @@ mod tests {
 
         let (ttl, data) = rr_db[domain];
         let data = data.octets();
-        
+
         let answer = Answer::new(domain, RRType::A, RRClass::IN, ttl, &data);
         let mut buf = BytesMut::new();
         answer.to_bytes(&mut buf);
 
         println!("{answer:?} -> {buf:?}");
 
-       Ok(()) 
+        Ok(())
     }
 }
