@@ -221,7 +221,7 @@ impl<'a> DNSHdr<'a> {
 */
 #[derive(Debug, Clone)]
 pub struct Query<'a> {
-    name: Vec<&'a [u8]>,
+    pub name: Vec<&'a [u8]>,
     pub qtype: u16,
     pub qclass: u16,
 }
@@ -325,8 +325,8 @@ pub struct Answer<'a> {
 }
 
 impl<'a> Answer<'a> {
-    pub fn new(name: &'a str, qtype: RRType, qclass: RRClass, ttl: u32, data: &'a [u8]) -> Self {
-        let name = name.split(".").map(|l| l.as_bytes()).collect::<Vec<_>>();
+    pub fn new(name: Vec<&'a [u8]>, qtype: RRType, qclass: RRClass, ttl: u32, data: &'a [u8]) -> Self {
+        //let name = name.split(".").map(|l| l.as_bytes()).collect::<Vec<_>>();
 
         Answer {
             name,
@@ -437,7 +437,7 @@ mod tests {
         let (ttl, data) = rr_db[domain];
         let data = data.octets();
 
-        let answer = Answer::new(domain, RRType::A, RRClass::IN, ttl, &data);
+        let answer = Answer::new(vec![&[0x03, 10, 20, 30, 0x0]], RRType::A, RRClass::IN, ttl, &data);
         let mut buf = BytesMut::new();
         answer.to_bytes(&mut buf);
 

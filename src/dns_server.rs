@@ -14,14 +14,16 @@ impl DNSServer {
 
         Ok(Self {
             socket: udp_socket,
-            rr_db: HashMap::from([(
-                "codecrafters.io".to_string(),
-                (60, Ipv4Addr::new(192, 168, 10, 10).octets()),
-            ),
-            (
-                "stackoverflow.com".to_string(),
-                (60, Ipv4Addr::new(192, 168, 10, 20).octets()),
-            )]),
+            rr_db: HashMap::from([
+                (
+                    "codecrafters.io".to_string(),
+                    (60, Ipv4Addr::new(192, 168, 10, 10).octets()),
+                ),
+                (
+                    "stackoverflow.com".to_string(),
+                    (60, Ipv4Addr::new(192, 168, 10, 20).octets()),
+                ),
+            ]),
         })
     }
 
@@ -45,13 +47,21 @@ impl DNSServer {
 
                         let response = match request.flags.opcode {
                             0 => {
-                                let domain = request.queries[0].domain();
-                                let answs = self
-                                    .rr_db
-                                    .get("codecrafters.io")
-                                    .map(|(ttl, data)| {
-                                        Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
-                                    });
+                                let answs = request
+                                    .queries
+                                    .iter()
+                                    .filter_map(|q| {
+                                        self.rr_db.get("codecrafters.io").map(|(ttl, data)| {
+                                            Answer::new(
+                                                q.name.clone(),
+                                                RRType::A,
+                                                RRClass::IN,
+                                                *ttl,
+                                                data,
+                                            )
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
 
                                 DNSHdr::new(
                                     request.id,
@@ -64,7 +74,7 @@ impl DNSServer {
                                         ..request.flags
                                     },
                                     request.queries.clone(),
-                                    Vec::from_iter(answs.into_iter()),
+                                    answs,
                                 )
                                 .to_bytes()
                             }
