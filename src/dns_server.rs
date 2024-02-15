@@ -17,6 +17,10 @@ impl DNSServer {
             rr_db: HashMap::from([(
                 "codecrafters.io".to_string(),
                 (60, Ipv4Addr::new(192, 168, 10, 10).octets()),
+            ),
+            (
+                "stackoverflow.com".to_string(),
+                (60, Ipv4Addr::new(192, 168, 10, 20).octets()),
             )]),
         })
     }
@@ -41,9 +45,12 @@ impl DNSServer {
                         let response = match request.flags.opcode {
                             0 => {
                                 let domain = request.queries[0].domain();
-                                let answs = self.rr_db.get(&domain).map(|(ttl, data)| {
-                                    Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
-                                });
+                                let answs = self
+                                    .rr_db
+                                    .get(&domain)
+                                    .map(|(ttl, data)| {
+                                        Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
+                                    });
 
                                 DNSHdr::new(
                                     request.id,
