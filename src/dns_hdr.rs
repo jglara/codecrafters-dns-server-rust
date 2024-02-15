@@ -23,7 +23,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::tag,
     combinator::map,
-    multi::{length_data, many0, many_till},
+    multi::{length_data, many_m_n, many_till},
     number::complete::{be_u16, be_u32, be_u8},
     sequence::tuple,
 };
@@ -52,7 +52,7 @@ impl Flags {
         (flags_h as u16) << 8 | (flags_l as u16)
     }
 
-    fn parse_flags<'a>(input: (&'a [u8], usize) ) -> nom::IResult<(&'a [u8], usize), Flags> {
+    fn parse_flags<'a>(input: (&'a [u8], usize)) -> nom::IResult<(&'a [u8], usize), Flags> {
         map(
             tuple((
                 take(1u8),
@@ -64,7 +64,7 @@ impl Flags {
                 take(3u8),
                 take(4u8),
             )),
-            |(qr, opcode, aa, tc, rd, ra, _, rcode) :(u8,u8,u8,u8,u8,u8,u8,u8)| Flags {
+            |(qr, opcode, aa, tc, rd, ra, _, rcode): (u8, u8, u8, u8, u8, u8, u8, u8)| Flags {
                 qr,
                 opcode,
                 aa,
@@ -72,9 +72,8 @@ impl Flags {
                 rd,
                 ra,
                 rcode,
-            }
+            },
         )(input)
-        
     }
 }
 
@@ -96,7 +95,6 @@ pub enum RCode {
     NotImplemted = 4,
     Refused = 5,
 }
-
 
 #[derive(Debug)]
 pub struct DNSHdr<'a> {
@@ -141,18 +139,57 @@ impl<'a> DNSHdr<'a> {
         buf.freeze()
     }
 
+    pub fn decompress_names(buf: &[u8]) -> Result<Bytes> {
+        let mut debuf = BytesMut::with_capacity(buf.len());
+
+        debuf.extend_from_slice(&buf[..DNS_HDR_SIZE]);
+
+        let mut ptr = DNS_HDR_SIZE;
+        // parse & copy labels
+        while ptr < buf.len() {
+            let b = buf[ptr];
+            ptr += 1;
+            if b & 0b1100_0000 != 0 {
+                let ptr_offset = (b & 0b0011_1111) as usize;
+                anyhow::ensure!(ptr_offset < buf.len());
+                debuf.extend_from_slice(
+                    buf[ptr_offset..]
+                        .split(|&b| b == 0x00)
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("error decompressing labels"))?,
+                );
+                debuf.put_u8(0x00);
+                debuf.extend_from_slice(&buf[ptr..ptr + 4]);
+                ptr += 4;
+
+            } else if b == 0 {
+                debuf.put_u8(b);
+                debuf.extend_from_slice(&buf[ptr..ptr + 4]);
+                ptr += 4;
+            } else {
+                debuf.put_u8(b);
+                debuf.extend_from_slice(&buf[ptr..ptr + (b as usize)]);
+                ptr += b as usize;
+            }
+        }
+
+        // parse & copy answers names
+
+        Ok(debuf.freeze())
+    }
+
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
-        let (rest, (id, flags, _qdcount, _ancount, nscount, arcount, queries, answers)) =
-            tuple((
-                be_u16,
-                nom::bits::bits(Flags::parse_flags),
-                be_u16,
-                be_u16,
-                be_u16,
-                be_u16,
-                Query::from_bytes,
-                Answer::from_bytes,
-            ))(buf)?;
+        let (rest, (id, flags, qdcount, ancount, nscount, arcount)) = tuple((
+            be_u16,
+            nom::bits::bits(Flags::parse_flags),
+            be_u16,
+            be_u16,
+            be_u16,
+            be_u16,
+        ))(buf)?;
+
+        let (rest, queries) = Query::from_bytes(rest, qdcount as usize)?;
+        let (rest, answers) = Answer::from_bytes(rest, ancount as usize)?;
 
         Ok((
             rest,
@@ -220,15 +257,19 @@ pub enum RRClass {
 }
 
 impl<'a> Query<'a> {
-    pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
-        let (rest, queries) = many0(map(
-            tuple((many_till(length_data(be_u8), tag("\x00")), be_u16, be_u16)),
-            |((labels, _), qtype, qclass)| Query {
-                name: labels,
-                qtype: qtype,
-                qclass: qclass,
-            },
-        ))(buf)?;
+    pub fn from_bytes(buf: &'a [u8], n: usize) -> nom::IResult<&'a [u8], Vec<Self>> {
+        let (rest, queries) = many_m_n(
+            n,
+            n,
+            map(
+                tuple((many_till(length_data(be_u8), tag("\x00")), be_u16, be_u16)),
+                |((labels, _), qtype, qclass)| Query {
+                    name: labels,
+                    qtype: qtype,
+                    qclass: qclass,
+                },
+            ),
+        )(buf)?;
 
         Ok((rest, queries))
     }
@@ -295,23 +336,27 @@ impl<'a> Answer<'a> {
         }
     }
 
-    pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
-        let (rest, responses) = many0(map(
-            tuple((
-                many_till(length_data(be_u8), tag("\x00")),
-                be_u16,
-                be_u16,
-                be_u32,
-                length_data(be_u16),
-            )),
-            |((labels, _), qtype, qclass, ttl, rddata)| Answer {
-                name: labels,
-                qtype: qtype,
-                qclass: qclass,
-                ttl: ttl,
-                rddata,
-            },
-        ))(buf)?;
+    pub fn from_bytes(buf: &'a [u8], n: usize) -> nom::IResult<&'a [u8], Vec<Self>> {
+        let (rest, responses) = many_m_n(
+            n,
+            n,
+            map(
+                tuple((
+                    many_till(length_data(be_u8), tag("\x00")),
+                    be_u16,
+                    be_u16,
+                    be_u32,
+                    length_data(be_u16),
+                )),
+                |((labels, _), qtype, qclass, ttl, rddata)| Answer {
+                    name: labels,
+                    qtype: qtype,
+                    qclass: qclass,
+                    ttl: ttl,
+                    rddata,
+                },
+            ),
+        )(buf)?;
 
         Ok((rest, responses))
     }
@@ -338,7 +383,15 @@ mod tests {
 
     #[test]
     fn test_encoding() {
-        let flags = Flags { qr: 1, opcode: 0, aa: 0, tc: 0, rd: 0, ra: 0, rcode: 0 };
+        let flags = Flags {
+            qr: 1,
+            opcode: 0,
+            aa: 0,
+            tc: 0,
+            rd: 0,
+            ra: 0,
+            rcode: 0,
+        };
         let answer = DNSHdr::new(12345, flags, vec![], vec![]);
 
         assert_eq!(answer.id, 12345);
@@ -350,9 +403,12 @@ mod tests {
 
     #[test]
     fn test_query_decode() -> Result<()> {
-        let buf = "\x06google\x03com\x00\x00\x01\x00\x01".as_bytes();
+        let buf: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,103,111,111,103,108,101,0x03,99,111,109,0x00, 0x00, 0x01, 0x00, 0x01, 0xc0, 0x00, 0x01, 0x00, 0x01];
 
-        let (_, qs) = Query::from_bytes(buf)?;
+        let buf = DNSHdr::decompress_names(buf)?;
+        println!("{buf:?}");
+
+        let (_, qs) = Query::from_bytes(&buf[DNS_HDR_SIZE..], 2).unwrap();
 
         let q = qs.iter().next().unwrap();
 
