@@ -47,7 +47,7 @@ impl DNSServer {
                                 let domain = request.queries[0].domain();
                                 let answs = self
                                     .rr_db
-                                    .get(&domain)
+                                    .get("codecrafters.io")
                                     .map(|(ttl, data)| {
                                         Answer::new(&domain, RRType::A, RRClass::IN, *ttl, data)
                                     });
