@@ -22,7 +22,7 @@ use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
     bytes::complete::tag,
-    combinator::map,
+    combinator::{map, verify},
     multi::{length_data, many_m_n, many_till},
     number::complete::{be_u16, be_u32, be_u8},
     sequence::tuple,
@@ -139,6 +139,7 @@ impl<'a> DNSHdr<'a> {
         buf.freeze()
     }
 
+    /* 
     pub fn decompress_names(buf: &[u8]) -> Result<Bytes> {
         let mut debuf = BytesMut::with_capacity(buf.len());
 
@@ -179,6 +180,8 @@ impl<'a> DNSHdr<'a> {
         Ok(debuf.freeze())
     }
 
+    */
+
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
         let (rest, (id, flags, qdcount, ancount, nscount, arcount)) = tuple((
             be_u16,
@@ -189,7 +192,7 @@ impl<'a> DNSHdr<'a> {
             be_u16,
         ))(buf)?;
 
-        let (rest, queries) = Query::from_bytes(rest, qdcount as usize)?;
+        let (rest, queries) = Query::from_bytes(rest, qdcount as usize, buf)?;
         let (rest, answers) = Answer::from_bytes(rest, ancount as usize)?;
 
         Ok((
@@ -257,19 +260,49 @@ pub enum RRClass {
     HS = 4, // Hesiod [Dyer 87]
 }
 
-fn parse_labels<'a> (buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
-    let (rest, (labels, _)) = many_till(length_data(be_u8), tag("\x00"))(buf)?;
+fn parse_labels<'a>(buf: &'a [u8], pkt:&'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
+    let mut labels = vec![];
+    let mut rest = buf;
+    
+
+    loop {
+        if let Ok((r, label))  = length_data(verify(be_u8::<_, nom::error::Error<_>>, |&l| l < 127))(rest) {
+            rest = r;
+            if label.len() > 0 {
+                labels.push(label);
+            } else {
+                break;
+            }
+        } else {
+            let (r, offset) = be_u16(rest)?;
+            let offset = (offset & 0b0011_1111_1111_1111) as usize;
+
+            let (_, compress_labels) = parse_labels(&pkt[offset..], pkt)?;
+            labels.extend(compress_labels);
+            
+            rest = r;
+            break;
+        }
+    }
 
     Ok((rest, labels))
 }
 
+/* 
+fn parse_labels_uncompress<'a>(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
+    let (rest, (labels, _)) = many_till(length_data(be_u8), tag("\x00"))(buf)?;
+
+    Ok((rest, labels))
+}
+*/
+
 impl<'a> Query<'a> {
-    pub fn from_bytes(buf: &'a [u8], n: usize) -> nom::IResult<&'a [u8], Vec<Self>> {
+    pub fn from_bytes(buf: &'a [u8], n: usize, pkt: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
         let (rest, queries) = many_m_n(
             n,
             n,
             map(
-                tuple((parse_labels, be_u16, be_u16)),
+                tuple((|i| {parse_labels(i,pkt)}, be_u16, be_u16)),
                 |(labels, qtype, qclass)| Query {
                     name: labels,
                     qtype: qtype,
@@ -416,6 +449,27 @@ mod tests {
 
     #[test]
     fn test_query_decode() -> Result<()> {
+        let buf: &[u8] = &[
+            250, 252, 1, 32, 0, 1, 0, 0, 0, 0, 0, 0, 12, 99, 111, 100, 101, 99, 114, 97, 102, 116,
+            101, 114, 115, 3, 105, 111, 120, 0, 0, 1, 0, 1,
+        ];
+
+        println!("{buf:?}");
+
+        let (_, qs) = Query::from_bytes(&buf[DNS_HDR_SIZE..], 1, &buf).unwrap();
+
+        let q = qs.iter().next().unwrap();
+
+        //assert_eq!(q.domain(), "google.com");
+
+        assert_eq!(q.qclass, RRClass::IN as u16);
+        assert_eq!(q.qtype, RRType::A as u16);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_decode_compressed() -> Result<()> {
         //let buf: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,103,111,111,103,108,101,0x03,99,111,109,0x00, 0x00, 0x01, 0x00, 0x01, 0xc0, 0x00, 0x01, 0x00, 0x01];
         let buf = &[
             212, 158, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 3, 97, 98, 99, 17, 108, 111, 110, 103, 97, 115,
@@ -423,12 +477,13 @@ mod tests {
             100, 101, 102, 192, 16, 0, 1, 0, 1,
         ];
 
-        let buf = DNSHdr::decompress_names(buf)?;
-        println!("{buf:?}");
+        //let buf = DNSHdr::decompress_names(buf)?;
+        //println!("{buf:?}");
 
-        let (_, qs) = Query::from_bytes(&buf[DNS_HDR_SIZE..], 2).unwrap();
+        let (_, qs) = Query::from_bytes(&buf[DNS_HDR_SIZE..], 2, buf).unwrap();
 
-        let q = qs.iter().next().unwrap();
+        let q = qs.iter().skip(1).next().unwrap();
+        println!("{q:?}");
 
         //assert_eq!(q.domain(), "google.com");
 

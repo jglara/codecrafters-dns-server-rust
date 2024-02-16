@@ -34,7 +34,7 @@ impl DNSServer {
             match self.socket.recv_from(&mut buf) {
                 Ok((size, source)) => {
                     println!("Received {} bytes from {} {:?}", size, source, &buf[..size]);
-                    let req = DNSHdr::decompress_names(&buf[..size]).unwrap();
+                    let req = &buf[..size];
                     if let Ok((_, request)) = DNSHdr::from_bytes(&req) {
                         eprintln!(
                             "Received DNS query: {:?} ",
