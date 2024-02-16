@@ -257,14 +257,20 @@ pub enum RRClass {
     HS = 4, // Hesiod [Dyer 87]
 }
 
+fn parse_labels<'a> (buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
+    let (rest, (labels, _)) = many_till(length_data(be_u8), tag("\x00"))(buf)?;
+
+    Ok((rest, labels))
+}
+
 impl<'a> Query<'a> {
     pub fn from_bytes(buf: &'a [u8], n: usize) -> nom::IResult<&'a [u8], Vec<Self>> {
         let (rest, queries) = many_m_n(
             n,
             n,
             map(
-                tuple((many_till(length_data(be_u8), tag("\x00")), be_u16, be_u16)),
-                |((labels, _), qtype, qclass)| Query {
+                tuple((parse_labels, be_u16, be_u16)),
+                |(labels, qtype, qclass)| Query {
                     name: labels,
                     qtype: qtype,
                     qclass: qclass,
@@ -325,7 +331,13 @@ pub struct Answer<'a> {
 }
 
 impl<'a> Answer<'a> {
-    pub fn new(name: Vec<&'a [u8]>, qtype: RRType, qclass: RRClass, ttl: u32, data: &'a [u8]) -> Self {
+    pub fn new(
+        name: Vec<&'a [u8]>,
+        qtype: RRType,
+        qclass: RRClass,
+        ttl: u32,
+        data: &'a [u8],
+    ) -> Self {
         //let name = name.split(".").map(|l| l.as_bytes()).collect::<Vec<_>>();
 
         Answer {
@@ -437,7 +449,13 @@ mod tests {
         let (ttl, data) = rr_db[domain];
         let data = data.octets();
 
-        let answer = Answer::new(vec![&[0x03, 10, 20, 30, 0x0]], RRType::A, RRClass::IN, ttl, &data);
+        let answer = Answer::new(
+            vec![&[0x03, 10, 20, 30, 0x0]],
+            RRType::A,
+            RRClass::IN,
+            ttl,
+            &data,
+        );
         let mut buf = BytesMut::new();
         answer.to_bytes(&mut buf);
 
