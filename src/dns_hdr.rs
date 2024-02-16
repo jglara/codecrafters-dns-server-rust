@@ -308,11 +308,11 @@ impl<'a> Query<'a> {
 */
 #[derive(Debug, Clone)]
 pub struct Answer<'a> {
-    name: Vec<&'a [u8]>,
+    pub name: Vec<&'a [u8]>,
     pub qtype: u16,
     pub qclass: u16,
     pub ttl: u32,
-    rddata: &'a [u8],
+    pub rddata: &'a [u8],
 }
 
 impl<'a> Answer<'a> {
