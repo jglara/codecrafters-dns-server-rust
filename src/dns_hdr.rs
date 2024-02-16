@@ -21,9 +21,8 @@ use anyhow::Result;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use nom::{
-    bytes::complete::tag,
     combinator::{map, verify},
-    multi::{length_data, many_m_n, many_till},
+    multi::{length_data, many_m_n},
     number::complete::{be_u16, be_u32, be_u8},
     sequence::tuple,
 };
@@ -139,48 +138,6 @@ impl<'a> DNSHdr<'a> {
         buf.freeze()
     }
 
-    /* 
-    pub fn decompress_names(buf: &[u8]) -> Result<Bytes> {
-        let mut debuf = BytesMut::with_capacity(buf.len());
-
-        debuf.extend_from_slice(&buf[..DNS_HDR_SIZE]);
-
-        let mut ptr = DNS_HDR_SIZE;
-        // parse & copy labels
-        while ptr < buf.len() {
-            let b = buf[ptr];
-            ptr += 1;
-            if b & 0b1100_0000 != 0 {
-                let b_l = buf[ptr];
-                ptr += 1;
-                let ptr_offset: usize = ((((b & 0b0011_1111) as u16) << 8) + b_l as u16) as usize;
-                anyhow::ensure!(ptr_offset < buf.len());
-                debuf.extend_from_slice(
-                    buf[ptr_offset..]
-                        .split(|&b| b == 0x00)
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("error decompressing labels"))?,
-                );
-                debuf.put_u8(0x00);
-                debuf.extend_from_slice(&buf[ptr..ptr + 4]);
-                ptr += 4;
-            } else if b == 0 {
-                debuf.put_u8(b);
-                debuf.extend_from_slice(&buf[ptr..ptr + 4]);
-                ptr += 4;
-            } else {
-                debuf.put_u8(b);
-                debuf.extend_from_slice(&buf[ptr..ptr + (b as usize)]);
-                ptr += b as usize;
-            }
-        }
-
-        // parse & copy answers names
-
-        Ok(debuf.freeze())
-    }
-
-    */
 
     pub fn from_bytes(buf: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
         let (rest, (id, flags, qdcount, ancount, nscount, arcount)) = tuple((
@@ -193,7 +150,7 @@ impl<'a> DNSHdr<'a> {
         ))(buf)?;
 
         let (rest, queries) = Query::from_bytes(rest, qdcount as usize, buf)?;
-        let (rest, answers) = Answer::from_bytes(rest, ancount as usize)?;
+        let (rest, answers) = Answer::from_bytes(rest, ancount as usize, buf)?;
 
         Ok((
             rest,
@@ -260,13 +217,14 @@ pub enum RRClass {
     HS = 4, // Hesiod [Dyer 87]
 }
 
-fn parse_labels<'a>(buf: &'a [u8], pkt:&'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
+fn parse_labels<'a>(buf: &'a [u8], pkt: &'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
     let mut labels = vec![];
     let mut rest = buf;
-    
 
     loop {
-        if let Ok((r, label))  = length_data(verify(be_u8::<_, nom::error::Error<_>>, |&l| l < 127))(rest) {
+        if let Ok((r, label)) =
+            length_data(verify(be_u8::<_, nom::error::Error<_>>, |&l| l < 127))(rest)
+        {
             rest = r;
             if label.len() > 0 {
                 labels.push(label);
@@ -276,25 +234,19 @@ fn parse_labels<'a>(buf: &'a [u8], pkt:&'a [u8]) -> nom::IResult<&'a [u8], Vec<&
         } else {
             let (r, offset) = be_u16(rest)?;
             let offset = (offset & 0b0011_1111_1111_1111) as usize;
+            if offset < pkt.len() {
+                let (_, compress_labels) = parse_labels(&pkt[offset..], pkt)?;
+                labels.extend(compress_labels);
 
-            let (_, compress_labels) = parse_labels(&pkt[offset..], pkt)?;
-            labels.extend(compress_labels);
-            
-            rest = r;
-            break;
+                rest = r;
+                break;
+            }
         }
     }
 
     Ok((rest, labels))
 }
 
-/* 
-fn parse_labels_uncompress<'a>(buf: &'a [u8]) -> nom::IResult<&'a [u8], Vec<&'a [u8]>> {
-    let (rest, (labels, _)) = many_till(length_data(be_u8), tag("\x00"))(buf)?;
-
-    Ok((rest, labels))
-}
-*/
 
 impl<'a> Query<'a> {
     pub fn from_bytes(buf: &'a [u8], n: usize, pkt: &'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
@@ -302,7 +254,7 @@ impl<'a> Query<'a> {
             n,
             n,
             map(
-                tuple((|i| {parse_labels(i,pkt)}, be_u16, be_u16)),
+                tuple((|i| parse_labels(i, pkt), be_u16, be_u16)),
                 |(labels, qtype, qclass)| Query {
                     name: labels,
                     qtype: qtype,
@@ -371,7 +323,7 @@ impl<'a> Answer<'a> {
         ttl: u32,
         data: &'a [u8],
     ) -> Self {
-        //let name = name.split(".").map(|l| l.as_bytes()).collect::<Vec<_>>();
+        
 
         Answer {
             name,
@@ -382,19 +334,19 @@ impl<'a> Answer<'a> {
         }
     }
 
-    pub fn from_bytes(buf: &'a [u8], n: usize) -> nom::IResult<&'a [u8], Vec<Self>> {
+    pub fn from_bytes(buf: &'a [u8], n: usize, pkt:&'a [u8]) -> nom::IResult<&'a [u8], Vec<Self>> {
         let (rest, responses) = many_m_n(
             n,
             n,
             map(
                 tuple((
-                    many_till(length_data(be_u8), tag("\x00")),
+                    |i| {parse_labels(i, pkt)},
                     be_u16,
                     be_u16,
                     be_u32,
                     length_data(be_u16),
                 )),
-                |((labels, _), qtype, qclass, ttl, rddata)| Answer {
+                |(labels, qtype, qclass, ttl, rddata)| Answer {
                     name: labels,
                     qtype: qtype,
                     qclass: qclass,
